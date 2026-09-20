@@ -19,7 +19,7 @@ jobs:
     steps:
       # Pinned to the SHA that triggered the run, because a tag is mutable and checkout resolves a
       # tag ref at fetch time. persist-credentials: false, since nothing here pushes.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -39,7 +39,7 @@ jobs:
     permissions:
       contents: write # moves the major tag and creates the release
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.sha }}
       # Users write pbiplint/action@v1 and get the newest v1.x.y: the major tag follows every

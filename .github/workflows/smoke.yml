@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out the sample model
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           repository: pbiplint/pbiplint
           ref: cb3a58121b450cf18b29ebe6f82bb2937002d993
