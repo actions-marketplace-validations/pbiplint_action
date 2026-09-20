@@ -16,7 +16,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -41,9 +41,9 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Check out the sample model
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           repository: pbiplint/pbiplint
           ref: cb3a58121b450cf18b29ebe6f82bb2937002d993
