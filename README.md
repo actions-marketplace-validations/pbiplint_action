@@ -32,7 +32,9 @@ jobs:
 ## What a run does
 
 - **Fails the check** when findings reach the `fail-on` severity (errors by default), so a project
-  that breaks a rule cannot merge. Set `fail-on: none` to report without ever failing.
+  that breaks a rule cannot merge. A rule that cannot finish on part of a project is reported as a
+  `RULE_COULD_NOT_FINISH` error, so it fails the check too. Set `fail-on: none` to report without
+  ever failing.
 - **Annotates the run and the pull request.** Each finding lands on its line of TMDL or report
   JSON in the Files changed tab. GitHub shows at most 10 annotations per severity per step; the
   rest are in the summary.
@@ -48,9 +50,18 @@ best-practice ruleset, ported and verified, and pbiplint's own rules for a year 
 DAX, for DAX user-defined functions, for translations, and for decimal columns' format strings. The
 report, in the PBIR format, is checked against the 11 base rules of PBI Inspector, ported, and
 pbiplint's own rules for a report's correctness and readiness and for the model objects the report
-never reaches. Every rule has a page at
+never reaches. The model's Power Query M is read with Microsoft's own parser and checked against 15
+rules of pbiplint's own, which makes 122 rules in all. Every rule has a page at
 https://pbiplint.com/rules with what it checks, why, and how to fix it. Configure rules with a
 `pbiplint.config.json` next to your project, as on the command line; the action picks it up.
+
+Version 1.7.0 of the action runs pbiplint 0.3.0, which can fail a step that passed under 0.2.5 at
+the default `fail-on: error`. Three of its new rules are errors (`DYNAMIC_DATA_SOURCE`,
+`HARDCODED_SECRET_IN_QUERY`, and `INCREMENTAL_REFRESH_RANGE_BOUNDS`), and a rule that cannot finish
+is now an error as well. The
+[release notes](https://github.com/pbiplint/pbiplint/releases/tag/v0.3.0) say what else changes in
+a project's findings and how to try the three new errors on a project first. To keep the older
+results while you fix what is new, set `pbiplint-version: 0.2.5`.
 
 ## Inputs
 
@@ -59,10 +70,10 @@ https://pbiplint.com/rules with what it checks, why, and how to fix it. Configur
 | `path`             | `.`        | What to lint, relative to the workspace: a PBIP folder, a `.pbip` file, a `.SemanticModel` or `.Report` folder, a `definition` folder, or one `.tmdl` file. |
 | `fail-on`          | `error`    | Lowest severity that fails the step: `error`, `warning`, `info`, or `none`.                                                                                 |
 | `config`           |            | A `pbiplint.config.json` to use. By default the nearest one above the project applies.                                                                      |
-| `pbiplint-version` | `0.2.5`    | The pbiplint CLI version to run. Each release of this action pins the current one; override to try a newer CLI early.                                       |
+| `pbiplint-version` | `0.3.0`    | The pbiplint CLI version to run. Each release of this action pins the current one; override to try a newer CLI early.                                       |
 | `annotations`      | `true`     | Annotate findings on the run and the pull request.                                                                                                          |
 | `upload-sarif`     | `true`     | Upload the SARIF report to code scanning. When the upload fails, the step notes why and carries on.                                                         |
-| `sarif-category`   | `pbiplint` | The code scanning category of the upload. Give each step its own when one workflow lints several projects.                                                  |
+| `sarif-category`   | `pbiplint` | The code scanning category of the upload. Give each step its own when one workflow has several pbiplint steps.                                              |
 
 ## Outputs
 
@@ -82,12 +93,32 @@ free. A private repository needs GitHub Code Security; without it the upload fai
 prints a notice, and the run carries on. Set `upload-sarif: false` to stop trying. Annotations and
 the summary work everywhere and need no permission.
 
-When one workflow lints several projects, give each step its own `sarif-category`, or the second
-upload replaces the first.
+When one workflow has several pbiplint steps, give each its own `sarif-category`, or the second
+upload replaces the first. One step that lints several projects makes one upload and needs only one
+category.
 
 ## Several projects
 
-One step per project. Point `path` at each and, if you upload, give each its own category:
+One step lints every project in a folder. Point `path` at a folder that holds several Power BI
+projects, below it or side by side as Power BI Desktop saves them, and pbiplint lints each one, up
+to 200, under one summary with one exit code and one SARIF upload. A model that several reports
+share is read once and its findings are listed once.
+
+```yaml
+- uses: pbiplint/action@v1
+  with:
+    path: reports
+```
+
+The default `path`, `.`, works the same way, so a repository with its projects in subfolders needs
+no `path` at all, and neither does one whose top level is the project folder, with the
+`.SemanticModel` and `.Report` folders in it. A project in the folder that pbiplint cannot read,
+such as a model saved in the older `model.bim` format, is a `PARSE_ISSUE` error while the others
+are still linted. A folder with more than 200 projects, or with none that pbiplint can read, fails
+the step with exit code 2.
+
+Separate steps still work, for example to give each project its own check or its own alerts. Point
+`path` at each and, if you upload, give each its own category:
 
 ```yaml
 - uses: pbiplint/action@v1
@@ -101,18 +132,16 @@ One step per project. Point `path` at each and, if you upload, give each its own
 ```
 
 A `.pbip` file names its report, and the report names its model, so two projects saved in one
-folder lint apart. A repository whose top level is the project folder, with the `.SemanticModel`
-and `.Report` folders in it, needs no `path` at all, and neither does one with a single project in a
-subfolder: pbiplint finds it, lints its model and its report with its `pbiplint.config.json`, and
-says so in a notice. A repository with several projects fails the step and lists them, so give each
-its own step, as above.
+folder lint apart. A step that names one `.pbip` reads only what is in that project's folder: a
+report whose model is kept elsewhere, such as in a shared `models/` folder, is linted without it,
+and a notice names the folder to lint instead.
 
 ## Runners
 
 Works on the GitHub-hosted Ubuntu, Windows, and macOS runners, which all have Node.js. A
-self-hosted runner needs Node.js 20.19 or later on the path. The linter reads only the project
-that `path` names and its `pbiplint.config.json`, or the one the `config` input names, and makes no
-network calls of its own; the one download is the pinned pbiplint package from npm.
+self-hosted runner needs Node.js 20.19 or later on the path. The linter reads only the projects
+that `path` names and their `pbiplint.config.json`, or the one the `config` input names, and makes
+no network calls of its own; the one download is the pinned pbiplint package from npm.
 
 ## How it works
 
