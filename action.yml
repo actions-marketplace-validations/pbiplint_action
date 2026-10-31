@@ -14,18 +14,19 @@ branding:
 inputs:
   path:
     description: >-
-      What to lint, relative to the workspace: a .SemanticModel folder, a PBIP folder, a
-      definition folder, or one .tmdl file.
+      What to lint, relative to the workspace: a PBIP folder, a .pbip file, a .SemanticModel or
+      .Report folder, a definition folder, or one .tmdl file.
     default: "."
   fail-on:
     description: "Lowest severity that fails the step: error, warning, info, or none."
     default: error
   config:
-    description: A pbiplint.config.json to use. By default the nearest one above the model applies.
+    description: >-
+      A pbiplint.config.json to use. By default the nearest one above the project applies.
     default: ""
   pbiplint-version:
     description: The pbiplint CLI version to run, as an npm version spec.
-    default: "0.1.2"
+    default: "0.3.0"
   annotations:
     description: >-
       Annotate findings on the run and on changed lines in the pull request (true or false).
@@ -39,13 +40,15 @@ inputs:
     default: "true"
   sarif-category:
     description: >-
-      The code scanning category of the upload. Give each step its own when one workflow lints
-      several models.
+      The code scanning category of the upload. Give each step its own when one workflow has
+      several pbiplint steps.
     default: pbiplint
 
 outputs:
   exit-code:
-    description: "pbiplint's exit code: 0 clean, 1 findings at or above fail-on, 2 usage or input error."
+    description: >-
+      pbiplint's exit code: 0 no findings at or above fail-on, 1 findings at or above fail-on,
+      2 usage or input error, or pbiplint could not run.
     value: ${{ steps.lint.outputs.exit-code }}
   sarif-file:
     description: Path of the SARIF report.
@@ -80,17 +83,36 @@ runs:
       run: |
         sarif="$RUNNER_TEMP/pbiplint.sarif"
         markdown="$RUNNER_TEMP/pbiplint.md"
-        rm -f "$sarif" "$markdown"
+        err="$RUNNER_TEMP/pbiplint.err"
+        rm -f "$sarif" "$markdown" "$err" "$RUNNER_TEMP/pbiplint-markdown.err"
+        # pbiplint's stderr reaches the log through src/log-safe.mjs, which escapes CI log command
+        # sequences, whichever pbiplint version runs.
+        # Should node fail, the step goes on with pbiplint's exit code, and says why the log is short;
+        # the messages are not copied as written.
+        to_log() {
+          node "$GITHUB_ACTION_PATH/src/log-safe.mjs" < "$1" >&2 ||
+            echo "pbiplint-action: could not copy pbiplint's messages to the log" >&2
+        }
         args=("$PBIPLINT_PATH" --fail-on "$PBIPLINT_FAIL_ON")
         if [ -n "$PBIPLINT_CONFIG" ]; then args+=(--config "$PBIPLINT_CONFIG"); fi
         # The exit code is the verdict; the last step exits with it once the report is out.
+        # What pbiplint says on stderr is kept for the job summary of a run that produced no report,
+        # then copied to the log. Written to a file rather than through a process substitution,
+        # which bash does not wait for, so the file is whole before the next step reads it.
         set +e
-        npx --yes "pbiplint@$PBIPLINT_VERSION" "${args[@]}" --format sarif --output "$sarif"
+        npx --yes "pbiplint@$PBIPLINT_VERSION" "${args[@]}" --format sarif --output "$sarif" 2>"$err"
         code=$?
         set -e
-        # The same run again as Markdown for the job summary. A usage error would only repeat.
+        to_log "$err"
+        # pbiplint writes the SARIF file on every run it completes, so a non-zero exit with none
+        # means it could not run, for example because npx could not install the version asked for.
+        if [ "$code" -ne 0 ] && [ ! -s "$sarif" ]; then code=2; fi
+        # The same run again as Markdown for the job summary. A usage error, or a run that could
+        # not start, would only repeat.
         if [ "$code" -ne 2 ]; then
-          npx --yes "pbiplint@$PBIPLINT_VERSION" "${args[@]}" --format markdown --output "$markdown" || true
+          npx --yes "pbiplint@$PBIPLINT_VERSION" "${args[@]}" --format markdown --output "$markdown" \
+            2>"$RUNNER_TEMP/pbiplint-markdown.err" || true
+          to_log "$RUNNER_TEMP/pbiplint-markdown.err"
         fi
         upload=false
         if [ "$PBIPLINT_UPLOAD" = "true" ] && [ -s "$sarif" ]; then upload=true; fi
@@ -111,6 +133,7 @@ runs:
         node "$GITHUB_ACTION_PATH/src/annotate.mjs"
         --sarif "$PBIPLINT_SARIF"
         --markdown "$RUNNER_TEMP/pbiplint.md"
+        --stderr "$RUNNER_TEMP/pbiplint.err"
         --annotations "$PBIPLINT_ANNOTATIONS"
         --exit-code "$PBIPLINT_EXIT"
 
@@ -118,7 +141,7 @@ runs:
     - name: Upload SARIF to code scanning
       id: upload
       if: steps.lint.outputs.upload == 'true'
-      uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+      uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
       continue-on-error: true
       with:
         sarif_file: ${{ steps.lint.outputs.sarif-file }}

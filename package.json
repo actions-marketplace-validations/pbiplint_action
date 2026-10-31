@@ -1,6 +1,6 @@
 {
   "name": "pbiplint-action",
-  "version": "1.0.1",
+  "version": "1.7.0",
   "private": true,
   "description": "GitHub Action for pbiplint: lint Power BI projects on every pull request, with annotations, a job summary, and code scanning upload.",
   "license": "MIT",
@@ -18,7 +18,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "eslint": "^10.10.0",
-    "prettier": "^3.9.6",
-    "vitest": "^5.0.0"
+    "prettier": "^3.9.9",
+    "vitest": "^5.0.3"
   }
 }

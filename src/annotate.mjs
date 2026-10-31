@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 // Turns a pbiplint SARIF file into GitHub workflow annotations, count outputs, and a job summary.
@@ -26,6 +26,21 @@ export function countFindings(sarif) {
 /** Artifact URIs are percent-encoded per segment; workflow commands want the plain workspace path. */
 const decodePath = (uri) => uri.split("/").map(decodeURIComponent).join("/");
 
+// The characters a terminal or a log acts on instead of printing: C0 (tab and newline included),
+// DEL, C1, and the Unicode bidirectional embeddings, overrides (U+202A to U+202E), and isolates
+// (U+2066 to U+2069). The same set as pbiplint core's showControls.
+// eslint-disable-next-line no-control-regex -- matching control characters is the whole point
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
+
+/**
+ * `text` with each control character shown as a backslash, `u`, and four lowercase hex digits
+ * (ESC as `\u001b`, a newline as `\u000a`), as pbiplint core's showControls writes them. Names
+ * and messages come from the repository being linted, and a hostile one could hide, reorder, or
+ * split what an annotation shows with an escape sequence, a right-to-left override, or a newline.
+ */
+export const showControls = (text) =>
+  String(text).replace(CONTROL, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+
 export function annotations(sarif, { cap = ANNOTATION_CAP } = {}) {
   const rules = new Map((run(sarif).tool?.driver?.rules ?? []).map((r) => [r.id, r]));
   const taken = { error: 0, warning: 0, notice: 0 };
@@ -43,10 +58,11 @@ export function annotations(sarif, { cap = ANNOTATION_CAP } = {}) {
     const loc = r.locations?.[0]?.physicalLocation;
     out.push({
       level,
+      // The path stays as it is, for GitHub to match to a file; the command escapes it.
       file: loc ? decodePath(loc.artifactLocation.uri) : undefined,
       line: loc?.region?.startLine,
-      title: name,
-      message: `${object}. Rule ${r.ruleId}${where}`,
+      title: showControls(name),
+      message: showControls(`${object}. Rule ${r.ruleId}${where}`),
     });
   }
   return out;
@@ -72,9 +88,38 @@ export function outputs(counts) {
 /** A job summary holds 1 MiB; this leaves headroom for the footer and multi-byte characters. */
 export const SUMMARY_LIMIT = 1_000_000;
 
-export function summary({ markdown, counts, annotated, annotate = true, exitCode = 0 }) {
-  if (markdown === undefined)
-    return `## pbiplint\n\npbiplint did not produce a report (exit code ${exitCode}). See the lint step's log for the error.\n`;
+/** How many lines of what pbiplint said the summary of a run with no report shows. */
+export const STDERR_LINES = 20;
+
+/**
+ * What pbiplint wrote to stderr, for the summary of a run that produced no report: its lines in a
+ * fence longer than any run of backquotes in them, so nothing in a path or a name is read as
+ * Markdown, each with its control characters shown. The usage hint pbiplint ends a refusal with
+ * is about the command line, not the action, so it is left out.
+ */
+function said(stderr) {
+  const lines = (stderr ?? "")
+    .split(/\r?\n/)
+    .filter((l) => l.trim() !== "" && l !== "Run pbiplint --help for usage.")
+    .map(showControls);
+  if (lines.length === 0) return undefined;
+  const shown = lines.slice(0, STDERR_LINES);
+  const longest = Math.max(
+    0,
+    ...shown.map((l) => Math.max(0, ...(l.match(/`+/g) ?? []).map((b) => b.length))),
+  );
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  const rest = lines.length > shown.length ? "\nThe rest is in the lint step's log.\n" : "";
+  return `${fence}text\n${shown.join("\n")}\n${fence}\n${rest}`;
+}
+
+export function summary({ markdown, counts, annotated, annotate = true, exitCode = 0, stderr }) {
+  if (markdown === undefined) {
+    const words = said(stderr);
+    return words === undefined
+      ? `## pbiplint\n\npbiplint did not produce a report (exit code ${exitCode}). See the lint step's log for the error.\n`
+      : `## pbiplint\n\npbiplint did not produce a report (exit code ${exitCode}). It said:\n\n${words}`;
+  }
   const footer =
     annotate && annotated < counts.findings
       ? `\nAnnotations on this run show ${annotated} of ${counts.findings} findings, the first ${ANNOTATION_CAP} of each severity. The full list is above.\n`
@@ -88,9 +133,13 @@ export function summary({ markdown, counts, annotated, annotate = true, exitCode
   return body + footer;
 }
 
-export function main({ sarifPath, markdownPath, annotate, exitCode, env, stdout }) {
+export function main({ sarifPath, markdownPath, stderrPath, annotate, exitCode, env, stdout }) {
   const sarif = existsSync(sarifPath) ? JSON.parse(readFileSync(sarifPath, "utf8")) : undefined;
   const markdown = existsSync(markdownPath) ? readFileSync(markdownPath, "utf8") : undefined;
+  const stderr =
+    stderrPath !== undefined && existsSync(stderrPath)
+      ? readFileSync(stderrPath, "utf8")
+      : undefined;
   const counts = sarif ? countFindings(sarif) : { findings: 0, errors: 0, warnings: 0, infos: 0 };
   const list = sarif && annotate ? annotations(sarif) : [];
   for (const a of list) stdout(workflowCommand(a));
@@ -98,12 +147,14 @@ export function main({ sarifPath, markdownPath, annotate, exitCode, env, stdout 
   if (env.GITHUB_STEP_SUMMARY)
     appendFileSync(
       env.GITHUB_STEP_SUMMARY,
-      summary({ markdown, counts, annotated: list.length, annotate, exitCode }),
+      summary({ markdown, counts, annotated: list.length, annotate, exitCode, stderr }),
     );
 }
 
-// node src/annotate.mjs --sarif <file> --markdown <file> --annotations true|false --exit-code <n>
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// node src/annotate.mjs --sarif <file> --markdown <file> [--stderr <file>] --annotations true|false
+//   --exit-code <n>
+// Node resolves the module's own URL through symbolic links, so the path it was run by is too.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const arg = (name) => {
     const i = process.argv.indexOf(`--${name}`);
     return i === -1 ? undefined : process.argv[i + 1];
@@ -111,6 +162,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   main({
     sarifPath: arg("sarif"),
     markdownPath: arg("markdown"),
+    stderrPath: arg("stderr"),
     annotate: arg("annotations") !== "false",
     exitCode: Number(arg("exit-code") ?? 0),
     env: process.env,
